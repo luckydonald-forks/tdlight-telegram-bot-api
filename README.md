@@ -1,4 +1,6 @@
 # TDLight Telegram Bot API
+The official documentation is [here](https://tdlight-team.github.io/tdlight-telegram-bot-api/).
+
 TDLight Telegram Bot API is a fork of the official Telegram Bot API, focused on memory footprint and performance.
 
 TDLight Telegram Bot API is 100% compatible with the official version.
@@ -14,7 +16,10 @@ Please note that only TDLight-specific issues are suitable for this repository.
 ## Table of Contents
 - [TDLight features](#tdlight-features)
     - [Added features](#added-features)
+      - [Added API Methods](#added-api-methods)
+      - [Added Command Line Parameters](#added-command-line-parameters)
     - [Modified features](#modified-features)
+    - [User Mode](#user-mode)
 - [Installation](#installation)
 - [Dependencies](#dependencies)
 - [Usage](#usage)
@@ -32,29 +37,34 @@ Please note that only TDLight-specific issues are suitable for this repository.
 #### TDLib replaced with TDLight
 [TDLight](https://github.com/tdlight-team/tdlight) provides constant memory usage, unlike tdlib that must be restarted to reduce the heap size.
 
-#### Command `optimize_memory`
-Calling `optimize_memory` will remove old data from the in-memory cache and give the freed memory back to the os
+<a name="added-api-methods"></a>
+#### Added API Methods
+##### Method `optimizeMemory`
+Calling `optimizeMemory` will remove old data from the in-memory cache and give the freed memory back to the os
 
-#### Command `getmessageinfo`
+##### Method `getMemoryStats`
+Calling `getMemoryStats` will return a json containing the info about the memory manager, more info [here](https://github.com/tdlight-team/tdlight#tdapigetmemorystatistics)
+
+##### Method `getMessageInfo`
 Get information about a message
-##### Parameters
+###### Parameters
 - `chat_id` Message chat id
 - `message_id` Message id
-##### Returns `message`
+###### Returns `message`
 
  Document the following methods:
-#### Command `getparticipants`
+##### Method `getParticipants`
 Get the member list of a supergroup or channel
-##### Parameters
+###### Parameters
 - `chat_id` Chat id
 - `filter` String, possible values are
     `members`, `parameters`, `admins`, `administators`, `restricted`, `banned`, `bots`
 - `offset` Number of users to skip
 - `limit` The maximum number of users be returned; up to 200
 
-##### Returns `ChatMember`
+###### Returns `ChatMember`
 
-#### Command `deletemessages`
+##### Method `deleteMessages`
 Delete all the messages with message_id in range between `start` and `end`.  
 The `start` parameter MUST be less than the `end` parameter  
 Both `start` and `end` must be positive non zero numbers  
@@ -65,59 +75,79 @@ It is not suggested to delete more than 200 messages per call
 **NOTE**  
 The maximum number of messages to be deleted in a single batch is determined by the `max-batch-operations` parameter and is 10000 by default
 
-##### Parameters
+###### Parameters
 - `chat_id` Chat id
 - `start` First message id to delete
 - `end` Last message id to delete
-##### Returns `true`
+###### Returns `true`
 
-#### Command `ping`
+##### Command `ping`
 Send an MTProto ping message to the telegram servers. 
 Useful to detect the delay of the bot api server.
 
-##### Parameters
+###### Parameters
 No parameters
-##### Returns `string`
+###### Returns `string`
 Ping delay in seconds represented as string.
 
 <!--TODO:
-#### Command `togglegroupinvites`
+#### Command `toggleGroupInvites`
 (todo)
 ##### Parameters
 - `(todo)`
 ##### Returns `(todo)`
 -->
-#### Executable flag `relative`
+
+<a name="added-command-line-parameters"></a>
+#### Added Command Line Parameters
+##### Flag `--relative`
 If enabled, allow only relative paths for files in local mode.
 
-#### Executable flag `insecure`
+##### Flag `--insecure`
 Allow http connection in non-local mode
 
-#### Executable parameter `max-batch-operations`
+##### Flag `--max-batch-operations=<number>`
 maximum number of batch operations (default 10000)
 
+##### Executable parameter `--stats-hide-sensible-data`
+Makes the stats page (if enabled) hide the bot token and the webhook url to no leak user secrets, when served publicly.
+
+#### Existing Command Line Parameters
+Which are not properly documented, so they are written down here.
+
+##### Flag `-v<number>`/`--verbose=<number>`
+Verbosity of logging.
+The [loglevels](https://github.com/tdlib/td/blob/eb80924dad30af4e6d8385d058bb7e847174df5e/tdutils/td/utils/logging.h#L103-L109) are
+- `0`: Only fatal errors (least noisy)
+- `1`: All errors
+- `2`: Warnings, too
+- `3`: Infos
+- `4`: Debug output (very spammy)
+- `1024`: Also the stuff which is considered to "never" appear (as of writing there's no such stuff).
+_For Docker containers, `$TELEGRAM_VERBOSITY` can be set._
+
 <a name="modified-features"></a>
-### Modified features
+#### Modified features
 
-#### Command `getchat`
-The command `getchat` will also try to resolve the username online, if it can't be found locally
+##### Method `getChat`
+The command `getChat` will also try to resolve the username online, if it can't be found locally
 
-#### Object `message`
-The `message` object now has two new fields:
+##### Object `Message`
+The `Message` object now has two new fields:
 - `views`: how many views has the message (usually the views are shown only for channel messages)
 - `forwards`: how many times the message has been forwarded
 
-#### Object `ChatMember`
+##### Object `ChatMember`
 The `ChatMember` object now has two new fields:
 - `joined_date`: integer, unix timestamp, when has the user joined
 - `inviter`: `User`, the inviter
 
-#### Object `Chat`
+##### Object `Chat`
 The `Chat` object now has two new fields:
 - `is_verified`: bool, optional, default false. Is the chat verified by Telegram, clients show a verified batch
 - `is_scam`: bool, optional, default false. Is the chat reported for scam, clients show a warning to the user
 
-#### Object `User`
+##### Object `User`
 The `User` object now has two new fields:
 - `is_verified`: bool, optional, default false. Is the user verified by Telegram, clients show a verified batch
 - `is_scam`: bool, optional, default false. Is the user reported for scam, clients show a warning to the user
@@ -125,6 +155,81 @@ The `User` object now has two new fields:
 In addition, the member list now shows the full bot list (previously only the bot that executed the query was shown)
 
 The bot will now receive Updates for all received media, even if a destruction timer is set.
+
+<a name="user-mode"></a>
+### User Mode
+
+You can allow user accounts to access the bot api with the command-line option `--allow-users` or set the env variable 
+`TELEGRAM_ALLOW_USERS` to `1` when using docker. User Mode is disabled by default, so only bots can access the api.
+
+You can now log into the bot api with user accounts to create userbots running on your account.
+
+Note: Never send your 2fa password over a plain http connection. Make sure https is enabled or use this api locally.
+
+#### User Authorization Process
+1. Send a request to `{api_url}/userlogin`
+
+   Parameters:
+   - `phone_number`: `string`. The phone number of your Telegram Account.
+   
+   Returns your `user_token` as `string`. You can use this just like a normal bot token on the `/user` endpoint
+   
+2. Send the received code to `{api_url}/user{user_token}/authcode`
+
+   Parameters:
+   - `code`: `int`. The code send to you by Telegram In-App or by SMS
+   
+   Will send `{"ok": true, "result": true}` on success. 
+   
+3. Optional: Send your 2fa password to `{api_url}/user{user_token}/2fapassword`
+   
+   Parameters:
+   - `password`: `string`. Password for 2fa authentication
+   
+   Will send `{"ok": true, "result": true}` on success. 
+   
+4. Optional: Register the user by calling `{api_url}/user{user_token}/registerUser`. 
+   
+   User registration is disabled by default. You can enable it with the `--allow-users-registration` command line
+   option or the env variable `TELEGRAM_ALLOW_USERS_REGISTRATION` set to `1` when using docker.
+   
+   Parameters:
+   - `first_name`: `string`. First name for the new account.
+   - `last_name`: `string`, optional. Last name for the new account.
+   
+   Will send `{"ok": true, "result": true}` on success. 
+   
+You are now logged in and can use all methods like in the bot api, just replace the 
+`/bot{bot_token}/` in your urls with `/user{token}/`. 
+   
+You only need to authenticate once, the account will stay logged in. You can use the `logOut` method to log out
+or simply close the session in your account settings.
+
+Some methods are (obviously) not available as a user. This includes:
+- `answerCallbackQuery`
+- `setMyCommands`
+- `editMessageReplyMarkup`
+- `uploadStickerFile`
+- `createNewStickerSet`
+- `addStickerToSet`
+- `setStickerPositionInSet`
+- `deleteStickerFromSet`
+- `setStickerSetThumb`
+- `sendInvoice`
+- `answerShippingQuery`
+- `answerPreCheckoutQuery`
+- `setPassportDataErrors`
+- `sendGame`
+- `setGameScore`
+- `getGameHighscores`
+
+It is also not possible to attach a `reply_markup` to any message.
+
+Your api wrapper may behave different in
+some cases, for examples command message-entities are not created in chats that don't contain any
+bots, so your Command Handler may not detect it.
+
+It is possible to have multiple user-tokens to multiple client instances on the same bot api server.
 
 <a name="installation"></a>
 ## Installation
@@ -134,14 +239,14 @@ The simplest way to use it is with this docker command:
 docker run -p 8081:8081 --env TELEGRAM_API_ID=API_ID --env TELEGRAM_API_HASH=API_HASH tdlight/tdlightbotapi 
 ```
 
-The simplest way to build `Telegram Bot API server` is to use our [Telegram Bot API server build instructions generator](https://tdlib.github.io/telegram-bot-api/build.html).
+The simplest way to build `Telegram Bot API server` is to use our [Telegram Bot API server build instructions generator](https://tdlight-team.github.io/tdlight-telegram-bot-api/build.html).
 If you do that, you'll only need to choose the target operating system to receive the complete build instructions.
 
 In general, you need to install all `Telegram Bot API server` [dependencies](#dependencies) and compile the source code using CMake:
 
 ```bash
 git clone --recursive https://github.com/tdlight-team/tdlight-telegram-bot-api
-cd telegram-bot-api
+cd tdlight-telegram-bot-api
 mkdir build
 cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..

@@ -19,6 +19,9 @@ CUSTOM_ARGS=""
 if [ -n "$TELEGRAM_STAT" ]; then
   CUSTOM_ARGS="${CUSTOM_ARGS} --http-stat-port=8082"
 fi
+if [ -n "$TELEGRAM_STAT_HIDE_SENSIBLE_DATA" ]; then
+  CUSTOM_ARGS="${CUSTOM_ARGS} --stats-hide-sensible-data"
+fi
 if [ -n "$TELEGRAM_FILTER" ]; then
   CUSTOM_ARGS="${CUSTOM_ARGS} --filter=$TELEGRAM_FILTER"
 fi
@@ -39,6 +42,12 @@ if [ -n "$TELEGRAM_LOCAL" ]; then
 fi
 if [ -n "$TELEGRAM_NO_FILE_LIMIT" ]; then
   CUSTOM_ARGS="${CUSTOM_ARGS} --no-file-limit"
+fi
+if [ -n "$TELEGRAM_ALLOW_USERS" ]; then
+  CUSTOM_ARGS="${CUSTOM_ARGS} --allow-users"
+fi
+if [ -n "$TELEGRAM_ALLOW_USERS_REGISTRATION" ]; then
+  CUSTOM_ARGS="${CUSTOM_ARGS} --allow-users-registration"
 fi
 if [ -n "$TELEGRAM_INSECURE" ]; then
   CUSTOM_ARGS="${CUSTOM_ARGS} --insecure"

@@ -33,6 +33,22 @@
 #include "td/utils/utf8.h"
 
 #include <cstdlib>
+#include <climits>
+
+#define CHECK_IS_BOT()                                                     \
+  if (is_user_) {                                                          \
+    return Status::Error(BOT_ONLY_ERROR_CODE, BOT_ONLY_ERROR_DESCRIPTION); \
+  }
+
+#define CHECK_IS_USER()                                                      \
+  if (!is_user_) {                                                           \
+    return Status::Error(USER_ONLY_ERROR_CODE, USER_ONLY_ERROR_DESCRIPTION); \
+  }
+
+#define CHECK_USER_REPLY_MARKUP()                                          \
+  if (reply_markup != nullptr && is_user_) {                               \
+    return Status::Error(BOT_ONLY_ERROR_CODE, BOT_ONLY_ERROR_DESCRIPTION); \
+  }
 
 namespace telegram_bot_api {
 
@@ -124,6 +140,9 @@ void Client::fail_query_with_error(PromisedQueryPtr query, int32 error_code, Sli
     case 403:
       prefix = Slice("Forbidden");
       break;
+    case 405:
+      prefix = Slice("Method Not Allowed");
+      break;
     case 500:
       prefix = Slice("Internal Server Error");
       break;
@@ -156,11 +175,12 @@ void Client::fail_query_with_error(PromisedQueryPtr &&query, object_ptr<td_api::
   fail_query_with_error(std::move(query), error->code_, error->message_, default_message);
 }
 
-Client::Client(td::ActorShared<> parent, const td::string &bot_token, bool is_test_dc, int64 tqueue_id,
+Client::Client(td::ActorShared<> parent, const td::string &bot_token, bool is_user, bool is_test_dc, int64 tqueue_id,
                std::shared_ptr<const ClientParameters> parameters, td::ActorId<BotStatActor> stat_actor)
     : parent_(std::move(parent))
     , bot_token_(bot_token)
     , bot_token_id_("<unknown>")
+    , is_user_(is_user)
     , is_test_dc_(is_test_dc)
     , tqueue_id_(tqueue_id)
     , parameters_(std::move(parameters))
@@ -253,11 +273,30 @@ bool Client::init_methods() {
 
   //custom methods
   methods_.emplace("getmessageinfo", &Client::process_get_message_info_query);
-  methods_.emplace("getparticipants", &Client::process_get_participants_query);
+  methods_.emplace("getparticipants", &Client::process_get_chat_members_query);
+  methods_.emplace("getchatmembers", &Client::process_get_chat_members_query);
   methods_.emplace("deletemessages", &Client::process_delete_messages_query);
   methods_.emplace("togglegroupinvites", &Client::process_toggle_group_invites_query);
   methods_.emplace("ping", &Client::process_ping_query);
+  methods_.emplace("getmemorystats", &Client::process_get_memory_stats_query);
 
+  //custom user methods
+  methods_.emplace("getchats", &Client::process_get_chats_query);
+  methods_.emplace("getcommonchats", &Client::process_get_common_chats_query);
+  methods_.emplace("getinactivechats", &Client::process_get_inactive_chats_query);
+  methods_.emplace("getnearbychats", &Client::process_get_nearby_chats_query);
+  methods_.emplace("searchpublicchats", &Client::process_search_public_chats_query);
+  methods_.emplace("votepoll", &Client::process_set_poll_answer_query);
+  methods_.emplace("joinchat", &Client::process_join_chat_query);
+  methods_.emplace("addchatmembers", &Client::process_add_chat_member_query);
+  methods_.emplace("reportchat", &Client::process_report_chat_query);
+  methods_.emplace("createchat", &Client::process_create_chat_query);
+  methods_.emplace("searchmessages", &Client::process_search_messages_query);
+  methods_.emplace("searchchatmessages", &Client::process_search_chat_messages_query);
+  methods_.emplace("getcallbackqueryanswer", &Client::process_get_callback_query_answer_query);
+  methods_.emplace("deletechathistory", &Client::process_delete_chat_history_query);
+  methods_.emplace("getscheduledmessages", &Client::process_get_scheduled_messages_query);
+  methods_.emplace("editmessagescheduling", &Client::process_edit_message_scheduling_query);
 
   return true;
 }
@@ -331,12 +370,16 @@ class Client::JsonUser : public Jsonable {
     if (user_info != nullptr && !user_info->language_code.empty()) {
       object("language_code", user_info->language_code);
     }
+
+    // start custom properties impl
     if (user_info != nullptr && user_info->is_verified) {
       object("is_verified", td::JsonBool(user_info->is_verified));
     }
     if (user_info != nullptr && user_info->is_scam) {
       object("is_scam", td::JsonBool(user_info->is_scam));
     }
+    //end custom properties impl
+
     if (is_bot && full_bot_info_) {
       object("can_join_groups", td::JsonBool(user_info->can_join_groups));
       object("can_read_all_group_messages", td::JsonBool(user_info->can_read_all_group_messages));
@@ -570,8 +613,12 @@ class Client::JsonMessage : public Jsonable {
 
 class Client::JsonChat : public Jsonable {
  public:
-  JsonChat(int64 chat_id, bool is_full, const Client *client, int64 pinned_message_id = -1)
-      : chat_id_(chat_id), is_full_(is_full), client_(client), pinned_message_id_(pinned_message_id) {
+  JsonChat(int64 chat_id, bool is_full, const Client *client, int64 pinned_message_id = -1, int32 distance = -1)
+      : chat_id_(chat_id)
+      , is_full_(is_full)
+      , client_(client)
+      , pinned_message_id_(pinned_message_id)
+      , distance_(distance) {
   }
   void store(JsonValueScope *scope) const {
     auto chat_info = client_->get_chat(chat_id_);
@@ -590,12 +637,16 @@ class Client::JsonChat : public Jsonable {
           object("username", user_info->username);
         }
         object("type", "private");
+
+        // start custom properties impl
         if (user_info->is_verified) {
           object("is_verified", td::JsonBool(user_info->is_verified));
         }
         if (user_info->is_scam) {
           object("is_scam", td::JsonBool(user_info->is_scam));
         }
+        // end custom properties impl
+
         if (is_full_) {
           if (!user_info->bio.empty()) {
             object("bio", user_info->bio);
@@ -641,12 +692,16 @@ class Client::JsonChat : public Jsonable {
         } else {
           object("type", "channel");
         }
+
+        // start custom properties impl
         if (supergroup_info->is_verified) {
           object("is_verified", td::JsonBool(supergroup_info->is_verified));
         }
         if (supergroup_info->is_scam) {
           object("is_scam", td::JsonBool(supergroup_info->is_scam));
         }
+        // end custom properties impl
+
         if (is_full_) {
           if (!supergroup_info->description.empty()) {
             object("description", supergroup_info->description);
@@ -698,6 +753,13 @@ class Client::JsonChat : public Jsonable {
         }
       }
     }
+
+    // start custom properties impl
+    if (distance_ >= 0) {
+      object("distance", td::JsonInt(distance_));
+    }
+    // end custom properties impl
+
   }
 
  private:
@@ -705,6 +767,7 @@ class Client::JsonChat : public Jsonable {
   bool is_full_;
   const Client *client_;
   int64 pinned_message_id_;
+  int32 distance_;
 };
 
 class Client::JsonMessageSender : public Jsonable {
@@ -1493,7 +1556,11 @@ class Client::JsonReplyMarkup : public Jsonable {
 void Client::JsonMessage::store(JsonValueScope *scope) const {
   CHECK(message_ != nullptr);
   auto object = scope->enter_object();
-  object("message_id", as_client_message_id(message_->id));
+  if (message_->is_scheduled) {
+    object("message_id", as_scheduled_message_id(message_->id));
+  } else {
+    object("message_id", as_client_message_id(message_->id));
+  }
   if (message_->sender_user_id != 0) {
     object("from", JsonUser(message_->sender_user_id, client_));
   }
@@ -1513,6 +1580,12 @@ void Client::JsonMessage::store(JsonValueScope *scope) const {
   }
   if (message_->forwards != 0) {
     object("forwards", message_->forwards);
+  }
+  if (message_->is_scheduled) {
+    object("is_scheduled", td::JsonBool(message_->is_scheduled));
+  }
+  if (message_->scheduled_at != 0) {
+    object("scheduled_at", message_->scheduled_at);
   }
   if (message_->initial_send_date > 0) {
     if (message_->initial_sender_user_id != 0) {
@@ -1546,6 +1619,9 @@ void Client::JsonMessage::store(JsonValueScope *scope) const {
   }
   if (message_->media_album_id != 0) {
     object("media_group_id", td::to_string(message_->media_album_id));
+  }
+  if (message_->message_thread_id != 0) {
+    object("message_thread_id", td::to_string(message_->message_thread_id));
   }
   switch (message_->content->get_id()) {
     case td_api::messageText::ID: {
@@ -2277,6 +2353,133 @@ class Client::JsonStickerSet : public Jsonable {
   const Client *client_;
 };
 
+// start custom Json objects impl
+
+class Client::JsonAuthorizationState : public Jsonable {
+ public:
+  JsonAuthorizationState(const td_api::AuthorizationState *state, td::string token = "")
+      : state_(state), token_(token) {
+  }
+
+  void store(JsonValueScope *scope) const {
+    auto object = scope->enter_object();
+    if (!token_.empty()) {
+      object("token", token_);
+    }
+    if (state_ == nullptr) {
+      object("authorization_state", "unknown");
+      return;
+    }
+    switch (state_->get_id()) {
+      case td_api::authorizationStateWaitCode::ID: {
+        object("authorization_state", "wait_code");
+        auto state_code = static_cast<const td_api::authorizationStateWaitCode *>(state_);
+        if (state_code != nullptr && state_code->code_info_ != nullptr && state_code->code_info_->timeout_ != 0) {
+          object("timeout", state_code->code_info_->timeout_);
+        }
+        break;
+      }
+      case td_api::authorizationStateWaitPassword::ID: {
+        object("authorization_state", "wait_password");
+        auto state_password = static_cast<const td_api::authorizationStateWaitPassword *>(state_);
+        if (state_password != nullptr) {
+          if (!state_password->password_hint_.empty()) {
+            object("password_hint", state_password->password_hint_);
+          }
+          object("has_recovery_email_address", td::JsonBool(state_password->has_recovery_email_address_));
+        }
+        break;
+      }
+      case td_api::authorizationStateWaitRegistration::ID:
+        object("authorization_state", "wait_registration");
+        break;
+      case td_api::authorizationStateReady::ID:
+        object("authorization_state", "ready");
+        break;
+
+      default:
+        object("authorization_state", "unknown");
+        break;
+    }
+  }
+
+ private:
+  const td_api::AuthorizationState *state_;
+  const td::string token_;
+};
+
+class Client::JsonCallbackQueryAnswer : public Jsonable {
+ public:
+  JsonCallbackQueryAnswer(const td_api::callbackQueryAnswer *answer) : answer_(answer) {
+  }
+
+  void store(JsonValueScope *scope) const {
+    auto object = scope->enter_object();
+    object("text", answer_->text_);
+    object("show_alert", td::JsonBool(answer_->show_alert_));
+    object("url", answer_->url_);
+  }
+
+ private:
+  const td_api::callbackQueryAnswer *answer_;
+};
+
+class Client::JsonChats : public Jsonable {
+ public:
+  JsonChats(const object_ptr<td_api::chats> &chats, const Client *client) : chats_(chats), client_(client) {
+  }
+  void store(JsonValueScope *scope) const {
+    auto array = scope->enter_array();
+    for (auto &chat : chats_->chat_ids_) {
+      array << JsonChat(chat, false, client_);
+    }
+  }
+
+ private:
+  const object_ptr<td_api::chats> &chats_;
+  const Client *client_;
+};
+
+class Client::JsonChatsNearby : public Jsonable {
+ public:
+  JsonChatsNearby(const object_ptr<td_api::chatsNearby> &chats_nearby, const Client *client)
+      : chats_nearby_(chats_nearby), client_(client) {
+  }
+  void store(JsonValueScope *scope) const {
+    auto array = scope->enter_array();
+    for (auto &chat : chats_nearby_->users_nearby_) {
+      array << JsonChat(chat->chat_id_, false, client_, -1, chat->distance_);
+    }
+    for (auto &chat : chats_nearby_->supergroups_nearby_) {
+      array << JsonChat(chat->chat_id_, false, client_, -1, chat->distance_);
+    }
+  }
+
+ private:
+  const object_ptr<td_api::chatsNearby> &chats_nearby_;
+  const Client *client_;
+};
+
+class Client::JsonMessagesArray : public Jsonable {
+ public:
+  explicit JsonMessagesArray(object_ptr<td_api::messages> &messages, Client *client) : messages_(messages), client_(client) {
+  }
+  void store(JsonValueScope *scope) const {
+    auto array = scope->enter_array();
+    for (auto &message : messages_->messages_) {
+      auto full_message_id = client_->add_message(std::move(message));
+      const MessageInfo *m = client_->get_message(full_message_id.chat_id, full_message_id.message_id);
+      array << JsonMessage(m, true, "search", client_);
+    }
+  }
+
+ private:
+  object_ptr<td_api::messages> &messages_;
+  Client *client_;
+};
+
+//end custom Json objects impl
+
 class Client::TdOnOkCallback : public TdQueryCallback {
  public:
   void on_result(object_ptr<td_api::Object> result) override {
@@ -2312,6 +2515,53 @@ class Client::TdOnAuthorizationCallback : public TdQueryCallback {
 
  private:
   Client *client_;
+};
+
+class Client::TdOnAuthorizationQueryCallback : public TdQueryCallback {
+ public:
+  TdOnAuthorizationQueryCallback(Client *client, PromisedQueryPtr query, bool send_token = false)
+      : client_(client), query_(std::move(query)), send_token_(send_token) {
+  }
+
+  void on_result(object_ptr<td_api::Object> result) override {
+    bool was_ready = client_->authorization_state_->get_id() != td_api::authorizationStateWaitPhoneNumber::ID;
+    bool can_retry = client_->authorization_state_->get_id() == td_api::authorizationStateWaitCode::ID ||
+                     client_->authorization_state_->get_id() == td_api::authorizationStateWaitPassword::ID ||
+                     client_->authorization_state_->get_id() == td_api::authorizationStateWaitRegistration::ID;
+    if (result->get_id() == td_api::error::ID) {
+      auto error = move_object_as<td_api::error>(result);
+      if (error->code_ == 429 || error->code_ >= 500 || (error->code_ != 401 && was_ready && !client_->is_user_)) {
+        // try again
+        return client_->on_update_authorization_state();
+      } else if (error->code_ == 400 && can_retry) {
+        return fail_query_with_error(std::move(query_), std::move(error));
+      }
+      fail_query(401, "Unauthorized: Log in failed, logging out due to " + td::oneline(to_string(error)),
+                 std::move(query_));
+      LOG(WARNING) << "Logging out due to " << td::oneline(to_string(error));
+      client_->log_out();
+    } else {
+      if (client_->authorization_state_->get_id() == td_api::authorizationStateWaitRegistration::ID &&
+          !client_->parameters_->allow_users_registration_) {
+        fail_query(401,
+                   "Unauthorized: It is not allowed to register users with this api. You can enable it with the "
+                   "command line option --allow-users-registration. Logging out",
+                   std::move(query_));
+        return client_->log_out();
+      }
+      if (send_token_) {
+        answer_query(JsonAuthorizationState(client_->authorization_state_.get(), client_->bot_token_), std::move(query_));
+
+      } else {
+        answer_query(JsonAuthorizationState(client_->authorization_state_.get()), std::move(query_));
+      }
+    }
+  }
+
+ private:
+  Client *client_;
+  PromisedQueryPtr query_;
+  bool send_token_;
 };
 
 class Client::TdOnInitCallback : public TdQueryCallback {
@@ -3237,21 +3487,163 @@ class Client::TdOnSendCustomRequestCallback : public TdQueryCallback {
 
 class Client::TdOnPingCallback : public TdQueryCallback {
  public:
-  TdOnPingCallback(PromisedQueryPtr query)
-      : query_(std::move(query)) {
+  explicit TdOnPingCallback(PromisedQueryPtr query) : query_(std::move(query)) {
   }
 
   void on_result(object_ptr<td_api::Object> result) override {
     if (result->get_id() == td_api::error::ID) {
       return fail_query_with_error(std::move(query_), move_object_as<td_api::error>(result), "Server not available");
     }
-    CHECK(result->get_id() == 959899022); // id for return type `seconds`
+    CHECK(result->get_id() == td_api::seconds::ID);
 
     auto seconds_ = move_object_as<td_api::seconds>(result);
-    answer_query(td::VirtuallyJsonableString(std::to_string(seconds_->seconds_)), std::move(query_));
+    answer_query(seconds_->seconds_, std::move(query_));
   }
 
  private:
+  PromisedQueryPtr query_;
+};
+
+class Client::TdOnGetMemoryStatisticsCallback : public TdQueryCallback {
+ public:
+  explicit TdOnGetMemoryStatisticsCallback(PromisedQueryPtr query)
+      : query_(std::move(query)) {
+  }
+
+  void on_result(object_ptr<td_api::Object> result) override {
+    if (result->get_id() == td_api::error::ID) {
+      return fail_query_with_error(std::move(query_), move_object_as<td_api::error>(result));
+    }
+
+    auto res = move_object_as<td_api::memoryStatistics>(result);
+
+    answer_query(td::JsonRaw(res->statistics_), std::move(query_));
+  }
+
+ private:
+  PromisedQueryPtr query_;
+};
+
+class Client::TdOnGetChatsCallback : public TdQueryCallback {
+ public:
+  explicit TdOnGetChatsCallback(Client *client, PromisedQueryPtr query) : client_(client), query_(std::move(query)) {
+  }
+
+  void on_result(object_ptr<td_api::Object> result) override {
+    if (result->get_id() == td_api::error::ID) {
+      return fail_query_with_error(std::move(query_), move_object_as<td_api::error>(result));
+    }
+    CHECK(result->get_id() == td_api::chats::ID);
+
+    auto chats = move_object_as<td_api::chats>(result);
+    answer_query(JsonChats(chats, client_), std::move(query_));
+  }
+
+ private:
+  const Client *client_;
+  PromisedQueryPtr query_;
+};
+
+class Client::TdOnGetChatsNearbyCallback : public TdQueryCallback {
+ public:
+  explicit TdOnGetChatsNearbyCallback(Client *client, PromisedQueryPtr query)
+      : client_(client), query_(std::move(query)) {
+  }
+
+  void on_result(object_ptr<td_api::Object> result) override {
+    if (result->get_id() == td_api::error::ID) {
+      return fail_query_with_error(std::move(query_), move_object_as<td_api::error>(result));
+    }
+    CHECK(result->get_id() == td_api::chatsNearby::ID);
+
+    auto chats_nearby = move_object_as<td_api::chatsNearby>(result);
+    answer_query(JsonChatsNearby(chats_nearby, client_), std::move(query_));
+  }
+
+ private:
+  const Client *client_;
+  PromisedQueryPtr query_;
+};
+
+class Client::TdOnJoinChatCallback : public TdQueryCallback {
+ public:
+  explicit TdOnJoinChatCallback(Client *client, PromisedQueryPtr query, int64 chat_id)
+      : client_(client), query_(std::move(query)), chat_id_(chat_id) {
+  }
+
+  void on_result(object_ptr<td_api::Object> result) override {
+    if (result->get_id() == td_api::error::ID) {
+      return fail_query_with_error(std::move(query_), move_object_as<td_api::error>(result));
+    }
+    CHECK(result->get_id() == td_api::ok::ID);
+
+    answer_query(JsonChat(chat_id_, false, client_), std::move(query_));
+  }
+
+ private:
+  const Client *client_;
+  PromisedQueryPtr query_;
+  int64 chat_id_;
+};
+
+class Client::TdOnReturnChatCallback : public TdQueryCallback {
+ public:
+  explicit TdOnReturnChatCallback(Client *client, PromisedQueryPtr query)
+      : client_(client), query_(std::move(query)) {
+  }
+
+  void on_result(object_ptr<td_api::Object> result) override {
+    if (result->get_id() == td_api::error::ID) {
+      return fail_query_with_error(std::move(query_), move_object_as<td_api::error>(result));
+    }
+    CHECK(result->get_id() == td_api::chat::ID);
+
+    auto chat = move_object_as<td_api::chat>(result);
+    answer_query(JsonChat(chat->id_, false, client_), std::move(query_));
+  }
+
+ private:
+  const Client *client_;
+  PromisedQueryPtr query_;
+};
+
+class Client::TdOnReturnMessagesCallback : public TdQueryCallback {
+ public:
+  explicit TdOnReturnMessagesCallback(Client *client, PromisedQueryPtr query)
+      : client_(client), query_(std::move(query)) {
+  }
+
+  void on_result(object_ptr<td_api::Object> result) override {
+    if (result->get_id() == td_api::error::ID) {
+      return fail_query_with_error(std::move(query_), move_object_as<td_api::error>(result));
+    }
+    CHECK(result->get_id() == td_api::messages::ID);
+
+    auto messages = move_object_as<td_api::messages>(result);
+    answer_query(JsonMessagesArray(messages, client_), std::move(query_));
+  }
+
+ private:
+  Client *client_;
+  PromisedQueryPtr query_;
+};
+
+class Client::TdOnGetCallbackQueryAnswerCallback : public TdQueryCallback {
+ public:
+  explicit TdOnGetCallbackQueryAnswerCallback(PromisedQueryPtr query)
+      : query_(std::move(query)) {
+  }
+
+  void on_result(object_ptr<td_api::Object> result) override {
+    if (result->get_id() == td_api::error::ID) {
+      return fail_query_with_error(std::move(query_), move_object_as<td_api::error>(result));
+    }
+    CHECK(result->get_id() == td_api::callbackQueryAnswer::ID);
+
+    auto answer = move_object_as<td_api::callbackQueryAnswer>(result);
+    answer_query(JsonCallbackQueryAnswer(answer.get()), std::move(query_));
+  }
+
   PromisedQueryPtr query_;
 };
 
@@ -3278,7 +3670,11 @@ std::size_t Client::get_pending_update_count() const {
 
 ServerBotInfo Client::get_bot_info() const {
   ServerBotInfo res;
-  res.id_ = bot_token_id_;
+  if (is_user_) {
+    res.id_ = td::to_string(my_id_);
+  } else {
+    res.id_ = bot_token_id_;
+  }
   res.token_ = bot_token_;
   auto user_info = get_user_info(my_id_);
   if (user_info != nullptr) {
@@ -3386,7 +3782,7 @@ void Client::raw_event(const td::Event::Raw &event) {
 }
 
 void Client::loop() {
-  if (logging_out_ || closing_ || was_authorized_) {
+  if (logging_out_ || closing_ || was_authorized_ || waiting_for_auth_input_) {
     while (!cmd_queue_.empty()) {
       auto query = std::move(cmd_queue_.front());
       cmd_queue_.pop();
@@ -3947,9 +4343,20 @@ void Client::on_update_authorization_state() {
     case td_api::authorizationStateWaitEncryptionKey::ID:
       return send_request(make_object<td_api::checkDatabaseEncryptionKey>(), std::make_unique<TdOnInitCallback>(this));
     case td_api::authorizationStateWaitPhoneNumber::ID:
-      return send_request(make_object<td_api::checkAuthenticationBotToken>(bot_token_),
-                          std::make_unique<TdOnAuthorizationCallback>(this));
+      if (is_user_) {
+        waiting_for_auth_input_ = true;
+        return loop();
+      } else {
+        return send_request(make_object<td_api::checkAuthenticationBotToken>(bot_token_),
+                            std::make_unique<TdOnAuthorizationCallback>(this));
+      }
+    case td_api::authorizationStateWaitCode::ID:
+    case td_api::authorizationStateWaitPassword::ID:
+    case td_api::authorizationStateWaitRegistration::ID:
+      waiting_for_auth_input_ = true;
+      return loop();
     case td_api::authorizationStateReady::ID: {
+      waiting_for_auth_input_ = false;
       auto user_info = get_user_info(my_id_);
       if (my_id_ <= 0 || user_info == nullptr) {
         return send_request(make_object<td_api::getMe>(), std::make_unique<TdOnAuthorizationCallback>(this));
@@ -3970,12 +4377,14 @@ void Client::on_update_authorization_state() {
       return loop();
     }
     case td_api::authorizationStateLoggingOut::ID:
+      waiting_for_auth_input_ = false;
       if (!logging_out_) {
         LOG(WARNING) << "Logging out";
         logging_out_ = true;
       }
       break;
     case td_api::authorizationStateClosing::ID:
+      waiting_for_auth_input_ = false;
       if (!closing_) {
         LOG(WARNING) << "Closing";
         closing_ = true;
@@ -4334,6 +4743,7 @@ void Client::on_closed() {
 
   if (logging_out_) {
     parameters_->shared_data_->webhook_db_->erase(bot_token_with_dc_);
+    parameters_->shared_data_->user_db_->erase(bot_token_with_dc_);
 
     class RmWorker : public td::Actor {
      public:
@@ -4916,8 +5326,8 @@ td::Result<td_api::object_ptr<td_api::InputMessageContent>> Client::get_input_me
   return nullptr;
 }
 
-td_api::object_ptr<td_api::messageSendOptions> Client::get_message_send_options(bool disable_notification) {
-  return make_object<td_api::messageSendOptions>(disable_notification, false, nullptr);
+td_api::object_ptr<td_api::messageSendOptions> Client::get_message_send_options(bool disable_notification, td_api::object_ptr<td_api::MessageSchedulingState> &&scheduling_state) {
+  return make_object<td_api::messageSendOptions>(disable_notification, false, std::move(scheduling_state));
 }
 
 td::Result<td::vector<td_api::object_ptr<td_api::InputInlineQueryResult>>> Client::get_inline_query_results(
@@ -5900,9 +6310,9 @@ td::int64 Client::get_message_id(const Query *query, Slice field_name) {
   }
 
   int arg = td::to_integer<int32>(s_arg);
-  if (arg < 0) {
-    return 0;
-  }
+  // if (arg < 0) {
+  //   return 0;
+  // }
 
   return as_tdlib_message_id(arg);
 }
@@ -5948,6 +6358,132 @@ td::int64 Client::extract_yet_unsent_message_query_id(int64 chat_id, int64 messa
 
   return query_id;
 }
+
+// start custom helper methods impl
+
+td::Result<td_api::object_ptr<td_api::MessageSchedulingState>> Client::get_message_scheduling_state(
+    const Query *query) {
+  auto send_at = trim(query->arg("send_at"));
+  if (send_at.empty()) {
+    return nullptr;
+  } else if (send_at == "online") {
+    return make_object<td_api::messageSchedulingStateSendWhenOnline>();
+  } else {
+    TRY_RESULT(send_at_date, td::to_integer_safe<td::int32>(send_at));
+    return make_object<td_api::messageSchedulingStateSendAtDate>(send_at_date);
+  }
+}
+
+template <class T>
+td::Result<td::vector<T>> Client::get_int_array_arg(const Query *query, Slice field_name, bool optional) {
+  auto input_options = query->arg(field_name);
+  if (input_options.empty() && optional) {
+    td::vector<T> array;
+    return std::move(array);
+  }
+  LOG(INFO) << "Parsing JSON object: " << input_options;
+  auto r_value = json_decode(input_options);
+  if (r_value.is_error()) {
+    LOG(INFO) << "Can't parse JSON object: " << r_value.error();
+    return Status::Error(400, "Can't parse option_ids JSON object");
+  }
+
+  auto value = r_value.move_as_ok();
+  if (value.type() != JsonValue::Type::Array) {
+    return Status::Error(400, "Expected an Array of Integer as options");
+  }
+
+  td::vector<T> array;
+  for (auto &element : value.get_array()) {
+    if (element.type() != JsonValue::Type::Number) {
+      return Status::Error(400, "Expected an elements to be of type Integer");
+    }
+    array.push_back(td::to_integer_safe<T>(element.get_number()).move_as_ok());
+  }
+  return std::move(array);
+}
+
+td::int64 Client::get_int64_arg(const Query *query, Slice field_name, int64 default_value, int64 min_value,
+                                int64 max_value) {
+  auto s_arg = query->arg(field_name);
+  if (s_arg.empty()) {
+    return default_value;
+  }
+
+  return td::clamp(td::to_integer<int64>(s_arg), min_value, max_value);
+}
+
+td::Result<td_api::object_ptr<td_api::ChatReportReason>> Client::get_report_reason(const Query *query,
+                                                                                   Slice field_name) {
+  auto reason = query->arg(field_name);
+  object_ptr<td_api::ChatReportReason> result;
+  if (reason.empty()) {
+    return Status::Error(400, "reason is not specified");
+  } else if (reason == "child_abuse") {
+    result = make_object<td_api::chatReportReasonChildAbuse>();
+  } else if (reason == "copyright") {
+    result = make_object<td_api::chatReportReasonCopyright>();
+  } else if (reason == "pornography") {
+    result = make_object<td_api::chatReportReasonPornography>();
+  } else if (reason == "spam") {
+    result = make_object<td_api::chatReportReasonSpam>();
+  } else if (reason == "unrelated_location") {
+    result = make_object<td_api::chatReportReasonUnrelatedLocation>();
+  } else if (reason == "violence") {
+    result = make_object<td_api::chatReportReasonViolence>();
+  } else {
+    result = make_object<td_api::chatReportReasonCustom>(reason.str());
+  }
+  return std::move(result);
+}
+
+td::Result<td_api::object_ptr<td_api::SearchMessagesFilter>> Client::get_search_messages_filter(const Query *query,
+                                                                                                Slice field_name) {
+  auto filter = query->arg(field_name);
+  object_ptr<td_api::SearchMessagesFilter> result;
+  if (filter.empty()) {
+    result = make_object<td_api::searchMessagesFilterEmpty>();
+  } else if (filter == "animation") {
+    result = make_object<td_api::searchMessagesFilterAnimation>();
+  } else if (filter == "audio") {
+    result = make_object<td_api::searchMessagesFilterAudio>();
+  } else if (filter == "call") {
+    result = make_object<td_api::searchMessagesFilterCall>();
+  } else if (filter == "chat_photo") {
+    result = make_object<td_api::searchMessagesFilterChatPhoto>();
+  } else if (filter == "document") {
+    result = make_object<td_api::searchMessagesFilterDocument>();
+  } else if (filter == "failed_to_send") {
+    result = make_object<td_api::searchMessagesFilterFailedToSend>();
+  } else if (filter == "mention") {
+    result = make_object<td_api::searchMessagesFilterMention>();
+  } else if (filter == "missed_call") {
+    result = make_object<td_api::searchMessagesFilterMissedCall>();
+  } else if (filter == "photo") {
+    result = make_object<td_api::searchMessagesFilterPhoto>();
+  } else if (filter == "photo_and_video") {
+    result = make_object<td_api::searchMessagesFilterPhotoAndVideo>();
+  } else if (filter == "pinned") {
+    result = make_object<td_api::searchMessagesFilterPinned>();
+  } else if (filter == "unread_mention") {
+    result = make_object<td_api::searchMessagesFilterUnreadMention>();
+  } else if (filter == "url") {
+    result = make_object<td_api::searchMessagesFilterUrl>();
+  } else if (filter == "video") {
+    result = make_object<td_api::searchMessagesFilterVideo>();
+  } else if (filter == "video_note") {
+    result = make_object<td_api::searchMessagesFilterVideoNote>();
+  } else if (filter == "voice_and_video_note") {
+    result = make_object<td_api::searchMessagesFilterVoiceAndVideoNote>();
+  } else if (filter == "voice_note") {
+    result = make_object<td_api::searchMessagesFilterVoiceNote>();
+  } else {
+    return Status::Error(400, "Filter not valid");
+  }
+  return std::move(result);
+}
+
+// end custom helper methods impl
 
 void Client::on_message_send_succeeded(object_ptr<td_api::message> &&message, int64 old_message_id) {
   auto full_message_id = add_message(std::move(message), true);
@@ -6029,6 +6565,19 @@ void Client::on_cmd(PromisedQueryPtr query) {
       return do_send_request(make_object<td_api::logOut>(), std::make_unique<TdOnOkQueryCallback>(std::move(query)));
     }
   }
+  if (waiting_for_auth_input_) {
+    if (query->method().empty()) {
+      return process_auth_phone_number_query(query);
+    } else if (query->method() == "authcode") {
+      return process_authcode_query(query);
+    } else if (query->method() == "2fapassword" || query->method() == "authpassword") {
+      return process_2fapassword_query(query);
+    } else if (query->method() == "registeruser" && parameters_->allow_users_registration_) {
+      return process_register_user_query(query);
+    } else {
+      return fail_query(404, "Not Found: login not yet completed", std::move(query));
+    }
+  }
 
   if (logging_out_) {
     return fail_query(LOGGING_OUT_ERROR_CODE, LOGGING_OUT_ERROR_DESCRIPTION, std::move(query));
@@ -6063,6 +6612,7 @@ td::Status Client::process_get_my_commands_query(PromisedQueryPtr &query) {
 }
 
 td::Status Client::process_set_my_commands_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   TRY_RESULT(bot_commands, get_bot_commands(query.get()));
   send_request(make_object<td_api::setCommands>(std::move(bot_commands)),
                std::make_unique<TdOnOkQueryCallback>(std::move(query)));
@@ -6208,12 +6758,14 @@ td::Status Client::process_send_voice_query(PromisedQueryPtr &query) {
 }
 
 td::Status Client::process_send_game_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   TRY_RESULT(game_short_name, get_required_string_arg(query.get(), "game_short_name"));
   do_send_message(make_object<td_api::inputMessageGame>(my_id_, game_short_name.str()), std::move(query));
   return Status::OK();
 }
 
 td::Status Client::process_send_invoice_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   TRY_RESULT(title, get_required_string_arg(query.get(), "title"));
   TRY_RESULT(description, get_required_string_arg(query.get(), "description"));
   TRY_RESULT(payload, get_required_string_arg(query.get(), "payload"));
@@ -6351,6 +6903,7 @@ td::Status Client::process_stop_poll_query(PromisedQueryPtr &query) {
   auto chat_id = query->arg("chat_id");
   auto message_id = get_message_id(query.get());
   TRY_RESULT(reply_markup, get_reply_markup(query.get()));
+  CHECK_USER_REPLY_MARKUP();
 
   resolve_reply_markup_bot_usernames(
       std::move(reply_markup), std::move(query),
@@ -6406,17 +6959,18 @@ td::Status Client::process_send_media_group_query(PromisedQueryPtr &query) {
   // TRY_RESULT(reply_markup, get_reply_markup(query.get()));
   auto reply_markup = nullptr;
   TRY_RESULT(input_message_contents, get_input_message_contents(query.get(), "media"));
+  TRY_RESULT(send_at, get_message_scheduling_state(query.get()));
 
   resolve_reply_markup_bot_usernames(
       std::move(reply_markup), std::move(query),
       [this, chat_id = chat_id.str(), reply_to_message_id, allow_sending_without_reply, disable_notification,
-       input_message_contents = std::move(input_message_contents)](object_ptr<td_api::ReplyMarkup> reply_markup,
-                                                                   PromisedQueryPtr query) mutable {
+       input_message_contents = std::move(input_message_contents),
+       send_at = std::move(send_at)](object_ptr<td_api::ReplyMarkup> reply_markup, PromisedQueryPtr query) mutable {
         auto on_success = [this, disable_notification, input_message_contents = std::move(input_message_contents),
-                           reply_markup = std::move(reply_markup)](int64 chat_id, int64 reply_to_message_id,
-                                                                   PromisedQueryPtr query) mutable {
+                           reply_markup = std::move(reply_markup), send_at = std::move(send_at)](
+                              int64 chat_id, int64 reply_to_message_id, PromisedQueryPtr query) mutable {
           send_request(make_object<td_api::sendMessageAlbum>(chat_id, 0, reply_to_message_id,
-                                                             get_message_send_options(disable_notification),
+                                                             get_message_send_options(disable_notification, std::move(send_at)),
                                                              std::move(input_message_contents)),
                        std::make_unique<TdOnSendMessageAlbumCallback>(this, std::move(query)));
         };
@@ -6446,6 +7000,7 @@ td::Status Client::process_edit_message_text_query(PromisedQueryPtr &query) {
   auto chat_id = query->arg("chat_id");
   auto message_id = get_message_id(query.get());
   TRY_RESULT(reply_markup, get_reply_markup(query.get()));
+  CHECK_USER_REPLY_MARKUP();
 
   if (chat_id.empty() && message_id == 0) {
     TRY_RESULT(inline_message_id, get_inline_message_id(query.get()));
@@ -6485,6 +7040,7 @@ td::Status Client::process_edit_message_live_location_query(PromisedQueryPtr &qu
   auto chat_id = query->arg("chat_id");
   auto message_id = get_message_id(query.get());
   TRY_RESULT(reply_markup, get_reply_markup(query.get()));
+  CHECK_USER_REPLY_MARKUP();
 
   if (chat_id.empty() && message_id == 0) {
     TRY_RESULT(inline_message_id, get_inline_message_id(query.get()));
@@ -6520,6 +7076,7 @@ td::Status Client::process_edit_message_media_query(PromisedQueryPtr &query) {
   auto chat_id = query->arg("chat_id");
   auto message_id = get_message_id(query.get());
   TRY_RESULT(reply_markup, get_reply_markup(query.get()));
+  CHECK_USER_REPLY_MARKUP();
   TRY_RESULT(input_media, get_input_media(query.get(), "media", false));
 
   if (chat_id.empty() && message_id == 0) {
@@ -6554,6 +7111,7 @@ td::Status Client::process_edit_message_caption_query(PromisedQueryPtr &query) {
   auto chat_id = query->arg("chat_id");
   auto message_id = get_message_id(query.get());
   TRY_RESULT(reply_markup, get_reply_markup(query.get()));
+  CHECK_USER_REPLY_MARKUP();
   TRY_RESULT(caption, get_caption(query.get()));
 
   if (chat_id.empty() && message_id == 0) {
@@ -6584,9 +7142,11 @@ td::Status Client::process_edit_message_caption_query(PromisedQueryPtr &query) {
 }
 
 td::Status Client::process_edit_message_reply_markup_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   auto chat_id = query->arg("chat_id");
   auto message_id = get_message_id(query.get());
   TRY_RESULT(reply_markup, get_reply_markup(query.get()));
+  CHECK_USER_REPLY_MARKUP();
 
   if (chat_id.empty() && message_id == 0) {
     TRY_RESULT(inline_message_id, get_inline_message_id(query.get()));
@@ -6636,6 +7196,7 @@ td::Status Client::process_delete_message_query(PromisedQueryPtr &query) {
 }
 
 td::Status Client::process_set_game_score_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   auto chat_id = query->arg("chat_id");
   auto message_id = get_message_id(query.get());
   TRY_RESULT(user_id, get_user_id(query.get()));
@@ -6673,6 +7234,7 @@ td::Status Client::process_set_game_score_query(PromisedQueryPtr &query) {
 }
 
 td::Status Client::process_get_game_high_scores_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   auto chat_id = query->arg("chat_id");
   auto message_id = get_message_id(query.get());
   TRY_RESULT(user_id, get_user_id(query.get()));
@@ -6698,6 +7260,7 @@ td::Status Client::process_get_game_high_scores_query(PromisedQueryPtr &query) {
 }
 
 td::Status Client::process_answer_inline_query_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   auto inline_query_id = td::to_integer<int64>(query->arg("inline_query_id"));
   auto is_personal = to_bool(query->arg("is_personal"));
   int32 cache_time = get_integer_arg(query.get(), "cache_time", 300, 0, 24 * 60 * 60);
@@ -6721,6 +7284,7 @@ td::Status Client::process_answer_inline_query_query(PromisedQueryPtr &query) {
 }
 
 td::Status Client::process_answer_callback_query_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   auto callback_query_id = td::to_integer<int64>(query->arg("callback_query_id"));
   td::string text = query->arg("text").str();
   bool show_alert = to_bool(query->arg("show_alert"));
@@ -6733,6 +7297,7 @@ td::Status Client::process_answer_callback_query_query(PromisedQueryPtr &query) 
 }
 
 td::Status Client::process_answer_shipping_query_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   auto shipping_query_id = td::to_integer<int64>(query->arg("shipping_query_id"));
   auto ok = to_bool(query->arg("ok"));
   td::vector<object_ptr<td_api::shippingOption>> shipping_options;
@@ -6749,6 +7314,7 @@ td::Status Client::process_answer_shipping_query_query(PromisedQueryPtr &query) 
 }
 
 td::Status Client::process_answer_pre_checkout_query_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   auto pre_checkout_query_id = td::to_integer<int64>(query->arg("pre_checkout_query_id"));
   auto ok = to_bool(query->arg("ok"));
   td::MutableSlice error_message;
@@ -7226,6 +7792,7 @@ td::Status Client::process_get_sticker_set_query(PromisedQueryPtr &query) {
 }
 
 td::Status Client::process_upload_sticker_file_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   TRY_RESULT(user_id, get_user_id(query.get()));
   auto png_sticker = get_input_file(query.get(), "png_sticker");
 
@@ -7238,6 +7805,7 @@ td::Status Client::process_upload_sticker_file_query(PromisedQueryPtr &query) {
 }
 
 td::Status Client::process_create_new_sticker_set_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   TRY_RESULT(user_id, get_user_id(query.get()));
   auto name = query->arg("name");
   auto title = query->arg("title");
@@ -7254,6 +7822,7 @@ td::Status Client::process_create_new_sticker_set_query(PromisedQueryPtr &query)
 }
 
 td::Status Client::process_add_sticker_to_set_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   TRY_RESULT(user_id, get_user_id(query.get()));
   auto name = query->arg("name");
   TRY_RESULT(stickers, get_input_stickers(query.get()));
@@ -7268,6 +7837,7 @@ td::Status Client::process_add_sticker_to_set_query(PromisedQueryPtr &query) {
 }
 
 td::Status Client::process_set_sticker_set_thumb_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   TRY_RESULT(user_id, get_user_id(query.get()));
   auto name = query->arg("name");
   auto thumbnail = get_input_file(query.get(), "thumb");
@@ -7280,6 +7850,7 @@ td::Status Client::process_set_sticker_set_thumb_query(PromisedQueryPtr &query) 
 }
 
 td::Status Client::process_set_sticker_position_in_set_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   auto file_id = trim(query->arg("sticker"));
   if (file_id.empty()) {
     return Status::Error(400, "Sticker is not specified");
@@ -7293,6 +7864,7 @@ td::Status Client::process_set_sticker_position_in_set_query(PromisedQueryPtr &q
 }
 
 td::Status Client::process_delete_sticker_from_set_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   auto file_id = trim(query->arg("sticker"));
   if (file_id.empty()) {
     return Status::Error(400, "Sticker is not specified");
@@ -7304,6 +7876,7 @@ td::Status Client::process_delete_sticker_from_set_query(PromisedQueryPtr &query
 }
 
 td::Status Client::process_set_passport_data_errors_query(PromisedQueryPtr &query) {
+  CHECK_IS_BOT();
   TRY_RESULT(user_id, get_user_id(query.get()));
   TRY_RESULT(passport_element_errors, get_passport_element_errors(query.get()));
 
@@ -7447,51 +8020,47 @@ td::Status Client::process_get_message_info_query(PromisedQueryPtr &query) {
   return Status::OK();
 }
 
-td::Status Client::process_get_participants_query(PromisedQueryPtr &query) {
+td::Status Client::process_get_chat_members_query(PromisedQueryPtr &query) {
   auto chat_id = query->arg("chat_id");
+  td::int32 offset = get_integer_arg(query.get(), "offset", 0);
+  td::int32 limit = get_integer_arg(query.get(), "limit", 200, 0, 200);
 
-  check_chat(chat_id, AccessRights::Read, std::move(query), [this](int64 chat_id, PromisedQueryPtr query) {
-    auto chat_info = get_chat(chat_id);
-    CHECK(chat_info != nullptr);
-    td::int32 offset = get_integer_arg(query.get(), "offset", 0);
-    td::int32 limit = get_integer_arg(query.get(), "limit", 200, 0, 200);
-
+  check_chat(
+      chat_id, AccessRights::Read, std::move(query), [this, offset, limit](int64 chat_id, PromisedQueryPtr query) {
+        auto chat_info = get_chat(chat_id);
+        CHECK(chat_info != nullptr);
     switch (chat_info->type) {
       case ChatInfo::Type::Private:
-        return fail_query(400, "Bad Request: there are no participants in the private chat", std::move(query));
+        return fail_query(400, "Bad Request: there are no administrators in the private chat", std::move(query));
       case ChatInfo::Type::Group: {
-        /*
         auto group_info = get_group_info(chat_info->group_id);
         CHECK(group_info != nullptr);
         return send_request(make_object<td_api::getBasicGroupFullInfo>(chat_info->group_id),
-                            std::make_unique<TdOnGetGroupMembersCallback>(this, true, std::move(query)))
-        */
-        return fail_query(400, "Bad Request: method not available for group chats", std::move(query));
+                            std::make_unique<TdOnGetGroupMembersCallback>(this, false, std::move(query)));
       }
       case ChatInfo::Type::Supergroup: {
         td_api::object_ptr<td_api::SupergroupMembersFilter> filter;
-        td::string type = "members";
-        if (query->has_arg("type")) {
-          type = td::to_lower(query->arg("type"));
-        }
-
-        if (type == "members" || type == "participants") {
+        td::string filter_name = td::to_lower(query->arg("filter"));
+        auto query_ = query->arg("query");
+        if (!query->empty()) {
+          filter = td_api::make_object<td_api::supergroupMembersFilterSearch>(query_.str());
+        } else if (filter_name == "members" || filter_name == "participants") {
           filter = td_api::make_object<td_api::supergroupMembersFilterRecent>();
-        } else if (type == "banned") {
+        } else if (filter_name == "banned") {
           filter = td_api::make_object<td_api::supergroupMembersFilterBanned>();
-        } else if (type == "restricted") {
+        } else if (filter_name == "restricted") {
           filter = td_api::make_object<td_api::supergroupMembersFilterRestricted>();
-        } else if (type == "bots") {
+        } else if (filter_name == "bots") {
           filter = td_api::make_object<td_api::supergroupMembersFilterBots>();
-        } else if (type == "admins" || type == "administrators") {
+        } else if (filter_name == "admins" || filter_name == "administrators") {
           filter = td_api::make_object<td_api::supergroupMembersFilterAdministrators>();
         } else {
           fail_query_with_error(std::move(query), 400, "Invalid member type");
           return;
         }
-
         return send_request(
-            make_object<td_api::getSupergroupMembers>(chat_info->supergroup_id, std::move(filter), offset, limit),
+            make_object<td_api::getSupergroupMembers>(
+                chat_info->supergroup_id, std::move(filter), offset, limit),
             std::make_unique<TdOnGetSupergroupMembersCallback>(this, get_chat_type(chat_id), std::move(query)));
       }
       case ChatInfo::Type::Unknown:
@@ -7535,11 +8104,10 @@ td::Status Client::process_delete_messages_query(PromisedQueryPtr &query) {
       ids.push_back(as_tdlib_message_id(i));
     }
 
-    if (ids.size() != 0) {
+    if (!ids.empty()) {
       send_request(make_object<td_api::deleteMessages>(chat_id, std::move(ids), true),
-                   std::make_unique<TdOnOkCallback>());
+                   std::make_unique<TdOnOkQueryCallback>(std::move(query)));
     }
-    answer_query(td::JsonTrue(), std::move(query));
   });
 
   return Status::OK();
@@ -7551,12 +8119,301 @@ td::Status Client::process_toggle_group_invites_query(PromisedQueryPtr &query) {
 }
 
 td::Status Client::process_ping_query(PromisedQueryPtr &query) {
-  send_request(make_object<td_api::pingProxy>(),
-               std::make_unique<TdOnPingCallback>(std::move(query)));
+  send_request(make_object<td_api::pingProxy>(), std::make_unique<TdOnPingCallback>(std::move(query)));
   return Status::OK();
 }
 
+td::Status Client::process_get_memory_stats_query(PromisedQueryPtr &query) {
+  send_request(make_object<td_api::getMemoryStatistics>(),
+               std::make_unique<TdOnGetMemoryStatisticsCallback>(std::move(query)));
+  return Status::OK();
+}
 //end custom methods impl
+//start custom user methods impl
+
+td::Status Client::process_get_chats_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  td::int64 offset_chat_id = get_integer_arg(query.get(), "offset_chat_id", 0);
+  send_request(make_object<td_api::getChats>(make_object<td_api::chatListMain>(), LLONG_MAX, offset_chat_id, 100),
+               std::make_unique<TdOnGetChatsCallback>(this, std::move(query)));
+  return Status::OK();
+}
+
+td::Status Client::process_get_common_chats_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  TRY_RESULT(user_id, get_user_id(query.get()));
+  td::int64 offset_chat_id = get_integer_arg(query.get(), "offset_chat_id", 0);
+
+  send_request(make_object<td_api::getGroupsInCommon>(user_id, offset_chat_id, 100),
+               std::make_unique<TdOnGetChatsCallback>(this, std::move(query)));
+  return Status::OK();
+}
+
+td::Status Client::process_get_inactive_chats_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+
+  send_request(make_object<td_api::getInactiveSupergroupChats>(),
+               std::make_unique<TdOnGetChatsCallback>(this, std::move(query)));
+  return Status::OK();
+}
+
+td::Status Client::process_get_nearby_chats_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  TRY_RESULT(location, get_location(query.get()));
+
+  send_request(make_object<td_api::searchChatsNearby>(std::move(location)),
+               std::make_unique<TdOnGetChatsNearbyCallback>(this, std::move(query)));
+  return Status::OK();
+}
+
+td::Status Client::process_search_public_chats_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  auto query_ = query->arg("query");
+
+  send_request(make_object<td_api::searchPublicChats>(query_.str()),
+               std::make_unique<TdOnGetChatsCallback>(this, std::move(query)));
+  return Status::OK();
+}
+
+td::Status Client::process_set_poll_answer_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  auto chat_id = query->arg("chat_id");
+  TRY_RESULT(option_ids, get_int_array_arg<td::int32>(query.get(), "option_ids"));
+
+  check_chat(chat_id, AccessRights::Read, std::move(query),
+             [this, option_ids = std::move(option_ids)](int64 chat_id, PromisedQueryPtr query) mutable {
+               auto message_id = get_message_id(query.get());
+               send_request(make_object<td_api::setPollAnswer>(chat_id, message_id, std::move(option_ids)),
+                            std::make_unique<TdOnOkQueryCallback>(std::move(query)));
+             });
+
+  return Status::OK();
+}
+
+td::Status Client::process_join_chat_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  auto chat_id = query->arg("chat_id");
+  auto invite_link = query->arg("invite_link");
+
+  if (!chat_id.empty()) {
+    check_chat(chat_id, AccessRights::Read, std::move(query), [this](int64 chat_id, PromisedQueryPtr query) {
+      send_request(make_object<td_api::joinChat>(chat_id),
+                   std::make_unique<TdOnJoinChatCallback>(this, std::move(query), chat_id));
+    });
+  } else if (!invite_link.empty()) {
+    send_request(make_object<td_api::joinChatByInviteLink>(invite_link.str()),
+                 std::make_unique<TdOnReturnChatCallback>(this, std::move(query)));
+  } else {
+    fail_query(400, "Bad request: Please specify chat_id or invite_link", std::move(query));
+  }
+
+  return Status::OK();
+}
+
+td::Status Client::process_add_chat_member_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  auto chat_id = query->arg("chat_id");
+  TRY_RESULT(user_id, get_user_id(query.get()))
+
+  check_chat(chat_id, AccessRights::Write, std::move(query),
+             [this, user_id](int64 chat_id, PromisedQueryPtr query) mutable {
+               auto chat = get_chat(chat_id);
+               if (chat->type == ChatInfo::Type::Supergroup) {
+                 std::vector<td::int32> user_ids{user_id};
+                 send_request(make_object<td_api::addChatMembers>(chat_id, std::move(user_ids)),
+                              std::make_unique<TdOnOkQueryCallback>(std::move(query)));
+               } else if (chat->type == ChatInfo::Type::Group) {
+                 send_request(make_object<td_api::addChatMember>(chat_id, user_id, 0),
+                              std::make_unique<TdOnOkQueryCallback>(std::move(query)));
+               }
+             });
+  return Status::OK();
+}
+
+td::Status Client::process_report_chat_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  auto chat_id = query->arg("chat_id");
+  TRY_RESULT(reason, get_report_reason(query.get()));
+  TRY_RESULT(message_ids, get_int_array_arg<td::int64>(query.get(), "message_ids", true));
+
+  check_chat(chat_id, AccessRights::Read, std::move(query),
+             [this, reason = std::move(reason), message_ids = std::move(message_ids)](int64 chat_id,
+                                                                                      PromisedQueryPtr query) mutable {
+               send_request(make_object<td_api::reportChat>(chat_id, std::move(reason), std::move(message_ids)),
+                            std::make_unique<TdOnOkQueryCallback>(std::move(query)));
+             });
+  return Status::OK();
+}
+
+td::Status Client::process_create_chat_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  auto chat_type = query->arg("type");
+  auto title = query->arg("title");
+  auto description = query->arg("description");
+
+  if (chat_type == "supergroup") {
+    send_request(make_object<td_api::createNewSupergroupChat>(title.str(), false, description.str(), nullptr),
+                 std::make_unique<TdOnReturnChatCallback>(this, std::move(query)));
+  } else if (chat_type == "channel") {
+    send_request(make_object<td_api::createNewSupergroupChat>(title.str(), true, description.str(), nullptr),
+                 std::make_unique<TdOnReturnChatCallback>(this, std::move(query)));
+  } else if (chat_type == "group") {
+    TRY_RESULT(initial_members, get_int_array_arg<td::int32>(query.get(), "user_ids"))
+    send_request(make_object<td_api::createNewBasicGroupChat>(std::move(initial_members), title.str()),
+                 std::make_unique<TdOnReturnChatCallback>(this, std::move(query)));
+  } else {
+    return Status::Error(400, "Chat type is not specified");
+  }
+  return Status::OK();
+}
+
+td::Status Client::process_search_messages_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  auto query_ = query->arg("query");
+  auto offset_date = get_integer_arg(query.get(), "offset_date", 0);
+  auto offset_chat_id = get_int64_arg(query.get(), "offset_chat_id", 0);
+  auto offset_message_id = get_int64_arg(query.get(), "offset_message_id", 0);
+  TRY_RESULT(filter, get_search_messages_filter(query.get()));
+  auto min_date = get_integer_arg(query.get(), "min_date", 0);
+  auto max_date = get_integer_arg(query.get(), "max_date", 0);
+
+  send_request(make_object<td_api::searchMessages>(nullptr, query_.str(), offset_date, offset_chat_id,
+                                                   offset_message_id, 100, std::move(filter), min_date, max_date),
+               std::make_unique<TdOnReturnMessagesCallback>(this, std::move(query)));
+  return Status::OK();
+}
+
+td::Status Client::process_search_chat_messages_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  auto chat_id = query->arg("chat_id");
+  auto query_ = query->arg("query");
+  auto sender_user_id = get_integer_arg(query.get(), "sender_user_id", 0);
+  auto sender = make_object<td_api::messageSenderUser>(sender_user_id);
+  if (sender_user_id == 0) {
+    sender = nullptr;
+  }
+  auto from_message_id = get_int64_arg(query.get(), "from_message_id", 0);
+  TRY_RESULT(filter, get_search_messages_filter(query.get()));
+
+  check_chat(chat_id, AccessRights::Read, std::move(query),
+             [this, query_, sender = std::move(sender), from_message_id, filter = std::move(filter)](
+                 int64 chat_id, PromisedQueryPtr query) mutable {
+               send_request(make_object<td_api::searchChatMessages>(chat_id, query_.str(), std::move(sender),
+                                                                    from_message_id, 0, 100, std::move(filter), 0),
+                            std::make_unique<TdOnReturnMessagesCallback>(this, std::move(query)));
+             });
+  return Status::OK();
+}
+
+td::Status Client::process_get_callback_query_answer_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  auto chat_id = query->arg("chat_id");
+  auto message_id = get_message_id(query.get());
+  auto callback_data = query->arg("callback_data");
+  auto payload = make_object<td_api::callbackQueryPayloadData>(callback_data.str());
+  check_chat(chat_id, AccessRights::Read, std::move(query),
+             [this, message_id, payload = std::move(payload)](int64 chat_id, PromisedQueryPtr query) mutable {
+               send_request(make_object<td_api::getCallbackQueryAnswer>(chat_id, message_id, std::move(payload)),
+                            std::make_unique<TdOnGetCallbackQueryAnswerCallback>(std::move(query)));
+             });
+  return Status::OK();
+}
+
+td::Status Client::process_delete_chat_history_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  auto chat_id = query->arg("chat_id");
+  bool for_everyone = to_bool(query->arg("for_everyone"));
+  bool remove_from_chat_list = to_bool(query->arg("remove_from_chat_list"));
+
+  check_chat(chat_id, AccessRights::Read, std::move(query),
+             [this, for_everyone, remove_from_chat_list](int64 chat_id, PromisedQueryPtr query) mutable {
+               send_request(make_object<td_api::deleteChatHistory>(chat_id, for_everyone, remove_from_chat_list),
+                            std::make_unique<TdOnOkQueryCallback>(std::move(query)));
+             });
+  return Status::OK();
+}
+
+td::Status Client::process_get_scheduled_messages_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  auto chat_id = query->arg("chat_id");
+  check_chat(chat_id, AccessRights::Read, std::move(query), [this](int64 chat_id, PromisedQueryPtr query) mutable {
+    send_request(make_object<td_api::getChatScheduledMessages>(chat_id),
+                 std::make_unique<TdOnReturnMessagesCallback>(this, std::move(query)));
+  });
+  return Status::OK();
+}
+
+td::Status Client::process_edit_message_scheduling_query(PromisedQueryPtr &query) {
+  CHECK_IS_USER();
+  auto chat_id = query->arg("chat_id");
+  auto message_id = get_message_id(query.get());
+  TRY_RESULT(send_at, get_message_scheduling_state(query.get()));
+  check_chat(chat_id, AccessRights::Read, std::move(query),
+             [this, message_id, send_at = std::move(send_at)](int64 chat_id, PromisedQueryPtr query) mutable {
+               send_request(make_object<td_api::editMessageSchedulingState>(chat_id, message_id, std::move(send_at)),
+                            std::make_unique<TdOnOkQueryCallback>(std::move(query)));
+             });
+  return Status::OK();
+}
+
+//end custom user methods impl
+//start custom auth methods impl
+
+void Client::process_auth_phone_number_query(PromisedQueryPtr &query) {
+  td::MutableSlice r_phone_number = query->arg("phone_number");
+  if (r_phone_number.size() < 5 || r_phone_number.size() > 15) {
+    return fail_query(401, "Unauthorized: invalid phone number specified", std::move(query));
+  }
+  td::int64 phone_number = 0;
+  for (char const &c : r_phone_number) {
+    if (isdigit(c)) {
+      phone_number = phone_number * 10 + (c - 48);
+    }
+  }
+  if (authorization_state_->get_id() != td_api::authorizationStateWaitPhoneNumber::ID) {
+    return fail_query(400, "Bad Request: currently not waiting for a phone_number", std::move(query));
+  }
+  send_request(make_object<td_api::setAuthenticationPhoneNumber>(td::to_string(phone_number), nullptr),
+               std::make_unique<TdOnAuthorizationQueryCallback>(this, std::move(query), true));
+}
+
+void Client::process_authcode_query(PromisedQueryPtr &query) {
+  auto code = query->arg("code");
+  if (code.empty()) {
+    return fail_query(400, "Bad Request: code not found", std::move(query));
+  }
+  if (authorization_state_->get_id() != td_api::authorizationStateWaitCode::ID) {
+    return fail_query(400, "Bad Request: currently not waiting for a code", std::move(query));
+  }
+  send_request(make_object<td_api::checkAuthenticationCode>(code.str()),
+               std::make_unique<TdOnAuthorizationQueryCallback>(this, std::move(query)));
+}
+
+void Client::process_2fapassword_query(PromisedQueryPtr &query) {
+  auto password = query->arg("password");
+  if (password.empty()) {
+    return fail_query(400, "Bad Request: password not found", std::move(query));
+  }
+  if (authorization_state_->get_id() != td_api::authorizationStateWaitPassword::ID) {
+    return fail_query(400, "Bad Request: currently not waiting for a password", std::move(query));
+  }
+  send_request(make_object<td_api::checkAuthenticationPassword>(password.str()),
+               std::make_unique<TdOnAuthorizationQueryCallback>(this, std::move(query)));
+}
+
+void Client::process_register_user_query(PromisedQueryPtr &query) {
+  auto first_name = query->arg("first_name");
+  if (first_name.empty()) {
+    return fail_query(400, "Bad Request: first_name not found", std::move(query));
+  }
+  auto last_name = query->arg("last_name");
+  if (authorization_state_->get_id() != td_api::authorizationStateWaitRegistration::ID) {
+    return fail_query(400, "Bad Request: currently not waiting for registration", std::move(query));
+  }
+  send_request(make_object<td_api::registerUser>(first_name.str(), last_name.str()),
+               std::make_unique<TdOnAuthorizationQueryCallback>(this, std::move(query)));
+}
+//end custom auth methods impl
 
 void Client::do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query) {
   if ((!parameters_->local_mode_ || !parameters_->no_file_limit_) &&
@@ -7776,17 +8633,26 @@ void Client::do_send_message(object_ptr<td_api::InputMessageContent> input_messa
     return fail_query_with_error(std::move(query), 400, r_reply_markup.error().message());
   }
   auto reply_markup = r_reply_markup.move_as_ok();
+  if (reply_markup != nullptr && is_user_) {
+    return fail_query_with_error(std::move(query), 405, "Method Not Allowed: reply markup not available as user.");
+  }
+
+  auto r_send_at = get_message_scheduling_state(query.get());
+  if (r_send_at.is_error()) {
+    return fail_query_with_error(std::move(query), 400, r_send_at.error().message());
+  }
+  auto send_at = r_send_at.move_as_ok();
 
   resolve_reply_markup_bot_usernames(
       std::move(reply_markup), std::move(query),
       [this, chat_id = chat_id.str(), reply_to_message_id, allow_sending_without_reply, disable_notification,
-       input_message_content = std::move(input_message_content)](object_ptr<td_api::ReplyMarkup> reply_markup,
-                                                                 PromisedQueryPtr query) mutable {
+       input_message_content = std::move(input_message_content),
+       send_at = std::move(send_at)](object_ptr<td_api::ReplyMarkup> reply_markup, PromisedQueryPtr query) mutable {
         auto on_success = [this, disable_notification, input_message_content = std::move(input_message_content),
-                           reply_markup = std::move(reply_markup)](int64 chat_id, int64 reply_to_message_id,
-                                                                   PromisedQueryPtr query) mutable {
+                           reply_markup = std::move(reply_markup), send_at = std::move(send_at)](
+                              int64 chat_id, int64 reply_to_message_id, PromisedQueryPtr query) mutable {
           send_request(make_object<td_api::sendMessage>(chat_id, 0, reply_to_message_id,
-                                                        get_message_send_options(disable_notification),
+                                                        get_message_send_options(disable_notification, std::move(send_at)),
                                                         std::move(reply_markup), std::move(input_message_content)),
                        std::make_unique<TdOnSendMessageCallback>(this, std::move(query)));
         };
@@ -7990,8 +8856,11 @@ void Client::add_user(std::unordered_map<int32, UserInfo> &users, object_ptr<td_
   user_info->last_name = user->last_name_;
   user_info->username = user->username_;
   user_info->language_code = user->language_code_;
+
+  // start custom properties
   user_info->is_verified = user->is_verified_;
   user_info->is_scam = user->is_scam_;
+  //end custom properties
 
   user_info->have_access = user->have_access_;
 
@@ -8061,8 +8930,11 @@ void Client::add_supergroup(std::unordered_map<int32, SupergroupInfo> &supergrou
   supergroup_info->status = std::move(supergroup->status_);
   supergroup_info->is_supergroup = !supergroup->is_channel_;
   supergroup_info->has_location = supergroup->has_location_;
+
+  // start custom properties
   supergroup_info->is_verified = supergroup->is_verified_;
   supergroup_info->is_scam = supergroup->is_scam_;
+  // end custom properties
 }
 
 void Client::set_supergroup_description(int32 supergroup_id, td::string &&descripton) {
@@ -9057,6 +9929,7 @@ Client::FullMessageId Client::add_message(object_ptr<td_api::message> &&message,
   message_info->edit_date = message->edit_date_;
   message_info->media_album_id = message->media_album_id_;
   message_info->via_bot_user_id = message->via_bot_user_id_;
+  message_info->message_thread_id = message->message_thread_id_;
 
   CHECK(message->sender_ != nullptr);
   switch (message->sender_->get_id()) {
@@ -9127,6 +10000,11 @@ Client::FullMessageId Client::add_message(object_ptr<td_api::message> &&message,
   if (message->interaction_info_ != nullptr) {
     message_info->views = message->interaction_info_->view_count_;
     message_info->forwards = message->interaction_info_->forward_count_;
+  }
+  message_info->is_scheduled = message->scheduling_state_!=nullptr;
+  if (message->scheduling_state_!=nullptr && message->scheduling_state_->get_id() == td_api::messageSchedulingStateSendAtDate::ID) {
+    auto scheduling_state = move_object_as<td_api::messageSchedulingStateSendAtDate>(message->scheduling_state_);
+    message_info->scheduled_at = scheduling_state->send_date_;
   }
 
   message_info->author_signature = std::move(message->author_signature_);
@@ -9307,13 +10185,24 @@ td::int32 Client::get_unix_time() const {
 }
 
 td::int64 Client::as_tdlib_message_id(int32 message_id) {
-  return static_cast<int64>(message_id) << 20;
+  if (message_id >= 0) {
+    return static_cast<int64>(message_id) << 20;
+  } else {
+    return static_cast<int64>((-message_id) << 3) + 4;
+  }
 }
 
 td::int32 Client::as_client_message_id(int64 message_id) {
   int32 result = static_cast<int32>(message_id >> 20);
-  CHECK(as_tdlib_message_id(result) == message_id);
+  CHECK(as_tdlib_message_id(result) >> 2 == message_id >> 2);
   return result;
+}
+
+td::int32 Client::as_scheduled_message_id(int64 message_id) {
+  // scheduled message ID layout
+  // |-------30-------|----18---|1|--2-|
+  // |send_date-2**30 |server_id|1|type|
+  return -static_cast<int32>((message_id >> 3) & ((1 << 18) - 1));
 }
 
 td::int64 Client::get_supergroup_chat_id(int32 supergroup_id) {
@@ -9334,6 +10223,12 @@ constexpr Client::Slice Client::LOGGING_OUT_ERROR_DESCRIPTION;
 
 constexpr int Client::CLOSING_ERROR_CODE;
 constexpr Client::Slice Client::CLOSING_ERROR_DESCRIPTION;
+
+constexpr int Client::BOT_ONLY_ERROR_CODE;
+constexpr Client::Slice Client::BOT_ONLY_ERROR_DESCRIPTION;
+
+constexpr int Client::USER_ONLY_ERROR_CODE;
+constexpr Client::Slice Client::USER_ONLY_ERROR_DESCRIPTION;
 
 std::unordered_map<td::string, td::Status (Client::*)(PromisedQueryPtr &query)> Client::methods_;
 

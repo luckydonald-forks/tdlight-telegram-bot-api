@@ -38,7 +38,7 @@ namespace td_api = td::td_api;
 
 class Client : public WebhookActor::Callback {
  public:
-  Client(td::ActorShared<> parent, const td::string &bot_token, bool is_test_dc, td::int64 tqueue_id,
+  Client(td::ActorShared<> parent, const td::string &bot_token, bool is_user, bool is_test_dc, td::int64 tqueue_id,
          std::shared_ptr<const ClientParameters> parameters, td::ActorId<BotStatActor> stat_actor);
 
   void send(PromisedQueryPtr query) override;
@@ -81,6 +81,12 @@ class Client : public WebhookActor::Callback {
 
   static constexpr int CLOSING_ERROR_CODE = 500;
   static constexpr Slice CLOSING_ERROR_DESCRIPTION = "Internal Server Error: restart";
+
+  static constexpr int BOT_ONLY_ERROR_CODE = 405;
+  static constexpr Slice BOT_ONLY_ERROR_DESCRIPTION = "Method Not Allowed: You can only use this method as a bot";
+
+  static constexpr int USER_ONLY_ERROR_CODE = 405;
+  static constexpr Slice USER_ONLY_ERROR_DESCRIPTION = "Method Not Allowed: You can only use this method as a user";
 
   class JsonFile;
   class JsonDatedFile;
@@ -147,8 +153,17 @@ class Client : public WebhookActor::Callback {
   class JsonStickerSet;
   class JsonCustomJson;
 
+  //start custom Json objects
+  class JsonAuthorizationState;
+  class JsonCallbackQueryAnswer;
+  class JsonChats;
+  class JsonChatsNearby;
+  class JsonMessagesArray;
+  //stop custom Json objects
+
   class TdOnOkCallback;
   class TdOnAuthorizationCallback;
+  class TdOnAuthorizationQueryCallback;
   class TdOnInitCallback;
   class TdOnGetUserProfilePhotosCallback;
   class TdOnSendMessageCallback;
@@ -180,6 +195,13 @@ class Client : public WebhookActor::Callback {
 
   //start custom callbacks
   class TdOnPingCallback;
+  class TdOnGetMemoryStatisticsCallback;
+  class TdOnGetChatsCallback;
+  class TdOnGetChatsNearbyCallback;
+  class TdOnJoinChatCallback;
+  class TdOnReturnChatCallback;
+  class TdOnReturnMessagesCallback;
+  class TdOnGetCallbackQueryAnswerCallback;
   //end custom callbacks
 
   void on_get_reply_message(int64 chat_id, object_ptr<td_api::message> reply_to_message);
@@ -392,7 +414,7 @@ class Client : public WebhookActor::Callback {
   td::Result<td::vector<object_ptr<td_api::InputMessageContent>>> get_input_message_contents(
       const Query *query, td::JsonValue &&value) const;
 
-  static object_ptr<td_api::messageSendOptions> get_message_send_options(bool disable_notification);
+  static object_ptr<td_api::messageSendOptions> get_message_send_options(bool disable_notification, object_ptr<td_api::MessageSchedulingState> &&scheduling_state);
 
   static td::Result<td::vector<td::string>> get_poll_options(const Query *query);
 
@@ -409,6 +431,24 @@ class Client : public WebhookActor::Callback {
   static td::Result<int32> get_user_id(const Query *query, Slice field_name = Slice("user_id"));
 
   int64 extract_yet_unsent_message_query_id(int64 chat_id, int64 message_id, bool *is_reply_to_message_deleted);
+  
+  // start custom helper methods
+
+  static td::Result<object_ptr<td_api::MessageSchedulingState>> get_message_scheduling_state(const Query *query);
+
+  template <class T>
+  static td::Result<td::vector<T>> get_int_array_arg(const Query *query, Slice field_name, bool optional = false);
+
+  static int64 get_int64_arg(const Query *query, Slice field_name, int64 default_value,
+                             int64 min_value = std::numeric_limits<int64>::min(),
+                             int64 max_value = std::numeric_limits<int64>::max());
+  static td::Result<td_api::object_ptr<td_api::ChatReportReason>> get_report_reason(const Query *query,
+                                                                                    Slice field_name = Slice("reason"));
+
+  static td::Result<td_api::object_ptr<td_api::SearchMessagesFilter>> get_search_messages_filter(
+      const Query *query, Slice field_name = Slice("filter"));
+
+  // end custom helper methods
 
   void on_message_send_succeeded(object_ptr<td_api::message> &&message, int64 old_message_id);
   void on_message_send_failed(int64 chat_id, int64 old_message_id, int64 new_message_id, Status result);
@@ -493,10 +533,35 @@ class Client : public WebhookActor::Callback {
 
   //custom methods
   Status process_get_message_info_query(PromisedQueryPtr &query);
-  Status process_get_participants_query(PromisedQueryPtr &query);
+  Status process_get_chat_members_query(PromisedQueryPtr &query);
   Status process_delete_messages_query(PromisedQueryPtr &query);
   Status process_toggle_group_invites_query(PromisedQueryPtr &query);
   Status process_ping_query(PromisedQueryPtr &query);
+  Status process_get_memory_stats_query(PromisedQueryPtr &query);
+
+  //custom user methods
+  Status process_get_chats_query(PromisedQueryPtr &query);
+  Status process_get_common_chats_query(PromisedQueryPtr &query);
+  Status process_get_inactive_chats_query(PromisedQueryPtr &query);
+  Status process_get_nearby_chats_query(PromisedQueryPtr &query);
+  Status process_search_public_chats_query(PromisedQueryPtr &query);
+  Status process_set_poll_answer_query(PromisedQueryPtr &query);
+  Status process_join_chat_query(PromisedQueryPtr &query);
+  Status process_add_chat_member_query(PromisedQueryPtr &query);
+  Status process_report_chat_query(PromisedQueryPtr &query);
+  Status process_create_chat_query(PromisedQueryPtr &query);
+  Status process_search_messages_query(PromisedQueryPtr &query);
+  Status process_search_chat_messages_query(PromisedQueryPtr &query);
+  Status process_get_callback_query_answer_query(PromisedQueryPtr &query);
+  Status process_delete_chat_history_query(PromisedQueryPtr &query);
+  Status process_get_scheduled_messages_query(PromisedQueryPtr &query);
+  Status process_edit_message_scheduling_query(PromisedQueryPtr &query);
+
+  //custom auth methods
+  void process_auth_phone_number_query(PromisedQueryPtr &query);
+  void process_authcode_query(PromisedQueryPtr &query);
+  void process_2fapassword_query(PromisedQueryPtr &query);
+  void process_register_user_query(PromisedQueryPtr &query);
 
 
   void webhook_verified(td::string cached_ip_address) override;
@@ -561,8 +626,11 @@ class Client : public WebhookActor::Callback {
 
     td::string bio;
 
+    // start custom properties
     bool is_verified = false;
     bool is_scam = false;
+    // end custom properties
+
     bool have_access = false;
     bool can_join_groups = false;
     bool can_read_all_group_messages = false;
@@ -599,8 +667,11 @@ class Client : public WebhookActor::Callback {
     bool is_supergroup = false;
     bool can_set_sticker_set = false;
     bool has_location = false;
+
+    // start custom properties
     bool is_verified = false;
     bool is_scam = false;
+    // end custom properties
   };
   static void add_supergroup(std::unordered_map<int32, SupergroupInfo> &supergroups,
                              object_ptr<td_api::supergroup> &&supergroup);
@@ -654,13 +725,19 @@ class Client : public WebhookActor::Callback {
     td::string initial_sender_name;
     td::string author_signature;
     int64 reply_to_message_id = 0;
+    int64 message_thread_id = 0;
     int64 media_album_id = 0;
     int32 via_bot_user_id = 0;
     object_ptr<td_api::MessageContent> content;
     object_ptr<td_api::ReplyMarkup> reply_markup;
 
+    // start custom properties
     int32 views = 0;
     int32 forwards = 0;
+
+    bool is_scheduled = false;
+    int32 scheduled_at = 0;
+    // end custom properties
 
     mutable bool is_reply_to_message_deleted = false;
     mutable bool is_content_changed = false;
@@ -744,6 +821,8 @@ class Client : public WebhookActor::Callback {
 
   static int32 as_client_message_id(int64 message_id);
 
+  static int32 as_scheduled_message_id(int64 message_id);
+
   static int64 get_supergroup_chat_id(int32 supergroup_id);
 
   static int64 get_basic_group_chat_id(int32 basic_group_id);
@@ -823,11 +902,13 @@ class Client : public WebhookActor::Callback {
   bool logging_out_ = false;
   bool need_close_ = false;
   bool clear_tqueue_ = false;
+  bool waiting_for_auth_input_ = false;
 
   td::ActorShared<> parent_;
   td::string bot_token_;
   td::string bot_token_with_dc_;
   td::string bot_token_id_;
+  bool is_user_;
   bool is_test_dc_;
   int64 tqueue_id_;
   double start_time_ = 0;
