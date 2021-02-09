@@ -38,6 +38,7 @@ struct SharedData {
   td::unique_ptr<td::TQueue> tqueue_;
 
   double unix_time_difference_{-1e100};
+  bool SEND_CORS_HEADERS = false;
 
   static constexpr size_t TQUEUE_EVENT_BUFFER_SIZE = 1000;
   td::TQueue::Event event_buffer_[TQUEUE_EVENT_BUFFER_SIZE];

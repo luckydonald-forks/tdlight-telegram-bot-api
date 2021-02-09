@@ -49,6 +49,9 @@ fi
 if [ -n "$TELEGRAM_ALLOW_USERS_REGISTRATION" ]; then
   CUSTOM_ARGS="${CUSTOM_ARGS} --allow-users-registration"
 fi
+if [ -n "$TELEGRAM_CORS_HEADERS" ]; then
+  CUSTOM_ARGS="${CUSTOM_ARGS} --cors-headers"
+fi
 if [ -n "$TELEGRAM_INSECURE" ]; then
   CUSTOM_ARGS="${CUSTOM_ARGS} --insecure"
 fi
